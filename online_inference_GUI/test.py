@@ -1,0 +1,121 @@
+import time
+from threading import Thread,Event
+import argparse
+import importlib
+import numpy as np
+import torch
+import cProfile
+import kaldiio
+import pstats
+import time
+import pickle
+import json
+from espnet.asr.pytorch_backend.asr_init import load_trained_model
+import torchaudio
+
+from espnet.nets.pytorch_backend.nets_utils import pad_list
+
+class online_inference():
+    def __init__(self, model, train_args, parser, is_sync):
+        self.model = model
+        self.char_list = train_args.char_list
+        self.parser = parser
+        self.hwsize = train_args.chunk_window_size
+        self.hwsize = self.hwsize - train_args.chunk_overlapped if is_sync else self.hwsize
+        self.overlapped = train_args.chunk_overlapped if is_sync else 0
+        if "compressive" in train_args.model_module:
+            if train_args.conv1d2decoder:
+                self.name = "com2"
+            else:
+                self.name = "com1"
+        else:
+            self.name = "sync"
+
+    def setup(self):
+        self.model.online_recognize_setup(self.parser.beam_size)
+        self.time_l = []
+        self.text_l = []
+        self.frame_l = []
+        self.tmp = '>'
+
+    def test_recognize_speed(self,feat):
+        with torch.no_grad():
+            self.setup()
+            n_chunk = (len(feat))//(self.hwsize*4) #-self.overlapped*4
+            self.get_inference(0,self.hwsize*4+self.overlapped*4+3,feat)
+            for i in range(1,n_chunk-1):
+                self.get_inference(i*(self.hwsize*4)+self.overlapped*4,(i+1)*(self.hwsize*4)+self.overlapped*4+3,feat)
+            print(n_chunk, "".join(self.text_l), sum(self.time_l))
+
+    def get_inference(self, left, right,feat):
+        a = time.time()
+        nbest_hyps = self.model.online_recognize_each_chunk(feat[left :right], parser)
+        b = time.time()
+        self.model.update_commem()
+        #best = sorted(nbest_hyps, key=lambda x: x["score"], reverse=True)[0]
+        test = "".join([self.char_list[i] for i in nbest_hyps[0]["yseq"]])
+        l = test.find(self.tmp,-4)
+        self.tmp = test[-1]
+        self.time_l.append(b-a)
+        self.frame_l.append(right)
+        self.text_l.append(test[l+1:])
+        #print(self.frame_l[-1], self.text_l[-1], b-a)
+
+    def save_data(self):
+        with open(self.name+".pickle","wb") as fp:
+            pickle.dump(self.frame_l,fp)
+            pickle.dump(self.text_l,fp)
+            pickle.dump(self.time_l,fp)
+
+def load_model(model_src, parser):
+    model, train_args = load_trained_model(model_src)
+    is_sync = 'sync' in model_src
+    online_model = online_inference(model, train_args, parser, is_sync)
+    return online_model
+
+def apply_cmvn(mat, stats):
+    mean = stats[0, :-1] / stats[0, -1]
+    variance = stats[1, :-1] / stats[0, -1] - np.square(mean)
+    return np.divide(np.subtract(mat, mean), np.sqrt(variance))
+
+def normalization(feature):
+    feature = torch.as_tensor(feature)
+    std, mean = torch.std_mean(feature, dim=0)
+    return (feature - mean) / std
+def convert_fbank(wav_src):
+    wavform, sample_frequency = torchaudio.load_wav(wav_src)
+    feature = torchaudio.compliance.kaldi.fbank(wavform*32768, num_mel_bins=80, sample_frequency=sample_frequency, dither=1)
+    return torch.as_tensor(feature)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.ctc_weight = 0.0
+    parser.beam_size = 5
+    parser.penalty = 0.0
+    parser.maxlenratio= 0.0
+    parser.minlenratio= 0.0
+    parser.nbest = 1
+
+    model_src_nopitch = "model/model.last5.avg.best35"
+    torch.manual_seed(1)  
+    torch.cuda.manual_seed_all(1)  
+    no_pitch = load_model(model_src_nopitch, parser)
+    all_feature = convert_fbank("demo/demo001.wav")
+    all_feature = torch.cat((all_feature,convert_fbank("demo/demo003.wav")),dim=0)
+    all_feature = torch.cat((all_feature,convert_fbank("demo/demo004.wav")),dim=0)
+    all_feature = torch.cat((all_feature,convert_fbank("demo/demo005.wav")),dim=0)
+    
+    std, mean = torch.std_mean(convert_fbank("demo/demo002.wav"), dim=0)
+    # std, mean = torch.std_mean(all_feature, dim=0)
+    wavform, sample_frequency = torchaudio.load_wav("demo/demo002.wav")
+    #0.015*16000=240
+
+    feature_all = torchaudio.compliance.kaldi.fbank(wavform[:,0:(36*160+240)]*32768, num_mel_bins=80, sample_frequency=sample_frequency, dither=1)
+    for i in range(1,14):
+        feature_x = torchaudio.compliance.kaldi.fbank(wavform[:,36*i*160:36*160*(i+1)+240]*32768, num_mel_bins=80, sample_frequency=sample_frequency, dither=1)
+        feature_all = torch.cat((feature_all,feature_x),dim=0)
+    demo_no_pitch = (feature_all-mean)/std
+    demo_no_pitch0 = convert_fbank("demo/BAC009S0723W0492.wav")
+    demo_no_pitch1 = normalization(demo_no_pitch0)
+    no_pitch.test_recognize_speed(demo_no_pitch)
+
+    pass

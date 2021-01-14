@@ -1,0 +1,54 @@
+# minibatch related
+#batch-size: 35
+#maxlen-in: 600  # if input length  > maxlen-in, batchsize is automatically reduced
+#maxlen-out: 150
+batch-bins: 5200000    #5992000
+batch-count: bin
+
+# optimization related
+criterion: loss
+early-stop-criterion: "validation/main/loss"
+sortagrad: 0
+opt: noam
+epochs: 35
+patience: 0
+accum-grad: 2
+grad-clip: 5.0
+
+#sync_transformer
+feedforwardGLU: True
+left_content: 80 #mean 80//4=20 because 2 layer conv2d
+chunk-window-size: 12  #org is 10
+
+#pretrain model
+load-pretrain: "/home/container_user/hang/espnet/egs/aishell/com_asr/exp/train_sp_pytorch_transformer256GLU1280FF/results/model.loss.best"
+# transformer related
+transformer-lr: 1
+transformer-warmup-steps: 25000
+transformer-attn-dropout-rate-encoder: 0.1 #0.4
+transformer-attn-dropout-rate-decoder: 0.1 #0.1
+
+# network architecture
+## encoder related
+etype: transformer
+transformer-input-layer: conv2d
+elayers: 6
+eunits: 1280
+dropout-rate: 0.2 #0.4
+## decoder related
+dtype: transformer
+dlayers: 6
+dec-embed-dim: 256
+dunits: 1280
+dropout-rate-decoder: 0.2 #0.1
+## attention related
+adim: 256
+aheads: 8
+## joint network related
+#joint-dim: 300
+
+# transducer related
+mtlalpha: 1.0 # mtlalpha should be set to 1.0 (CTC) to use transducer
+rnnt-mode: 'rnnt' # switch to 'rnnt-att' to use transducer with attention
+model-module: espnet.nets.pytorch_backend.e2e_asr_sync_transducer:E2E
+# model-module: espnet.nets.pytorch_backend.e2e_asr_transducer:E2E
